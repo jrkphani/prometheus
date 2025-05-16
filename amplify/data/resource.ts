@@ -1,5 +1,6 @@
 import { a, defineData, defineFunction } from '@aws-amplify/backend';
 import { auth } from '../auth/resource';
+import { proposalGeneratorLambda } from '../functions';
 
 /*== STEP 1 ===============================================================
 The section below creates a Todo database table with a "content" field. Try
@@ -43,8 +44,9 @@ export const proposalIdGenerator = defineFunction({
   entry: '../custom-logic/proposalIdGenerator.ts',
 });
 
-// Define the schema with only the Proposal model
+// Define the schema with Proposal, ProposalSection, and Question models
 const schema = a.schema({
+
   Proposal: a
     .model({
       // The owner field will be auto-populated by Amplify
@@ -61,11 +63,57 @@ const schema = a.schema({
         'LOST', 
         'ARCHIVED'
       ]),
+      // Storing as a string, which will contain JSON from Yoopta.
+      editorContent: a.string(),
     })
     .authorization((auth) => [
       auth.owner().to(['read', 'create', 'delete', 'update']),
       auth.authenticated().to(['read', 'create']),
     ]),
+
+  // New Model: ProposalSection
+  ProposalSection: a
+    .model({
+      owner: a.string(),
+      proposalId: a.string().required(), // Foreign key to Proposal.id
+      title: a.string().required(),
+      order: a.integer().required().default(0),
+    })
+    .authorization((auth) => [
+      auth.owner().to(['read', 'create', 'delete', 'update']),
+    ])
+    // Adding GSI for proposalId
+    .index('byProposalId', { 
+      sortKeyFields: ['order'],
+      fields: ['proposalId']
+    }),
+
+  // New Model: Question
+  Question: a
+    .model({
+      owner: a.string(),
+      proposalSectionId: a.string().required(), // Foreign key to ProposalSection.id
+      proposalId: a.string().required(), // Denormalized for easier querying
+      text: a.string().required(),
+      answer: a.string(), // Simple text answer for now
+      isMandatory: a.boolean().required().default(false),
+      order: a.integer().required().default(0),
+    })
+    .authorization((auth) => [
+      auth.owner().to(['read', 'create', 'delete', 'update']),
+    ])
+    // Adding GSI for proposalSectionId
+    .index('byProposalSectionId', { 
+      sortKeyFields: ['order'],
+      fields: ['proposalSectionId']
+    })
+    // Adding GSI for proposalId
+    .index('byProposalId', { 
+      sortKeyFields: ['order'],
+      fields: ['proposalId']
+    }),
+    
+  // Note: The proposal generator Lambda is added to the functions object below
 });
 
 // Export the schema type for frontend client generation
@@ -77,21 +125,30 @@ export const data = defineData({
   authorizationModes: {
     defaultAuthorizationMode: 'userPool',
   },
+  // Add the custom function resolvers
+  functions: {
+    proposalIdGenerator,
+    proposalGeneratorLambda, // This makes the Lambda available via GraphQL
+  }
 });
 
 /*
-Explanation of Authorization Rules for Proposal Model:
-- `.authorization([...])` at the model level defines the primary access patterns.
+Explanation of Authorization Rules:
+- For all models (Proposal, ProposalSection, Question), we use owner-based authorization
+- When creating records, the client must ensure that the owner field matches the parent record's owner
+- ProposalSection links to Proposal via proposalId
+- Question links to ProposalSection via proposalSectionId and also has direct proposalId for easier querying
+- Order fields in both ProposalSection and Question allow for sorting/ordering of content
 
-1. `auth.owner().to(['read', 'create', 'delete', 'update'])`:
-   - This is the core rule for multi-tenancy.
-   - When a new Proposal is created, Amplify automatically populates an `owner` field with the Cognito username of the creator.
-   - This rule ensures that only the user who created the proposal can perform CRUD operations on it.
+GSIs (Global Secondary Indexes) for efficient querying:
+1. ProposalSection by proposalId - Added with model.index('byProposalId')
+2. Question by proposalSectionId - Added with model.index('byProposalSectionId')
+3. Question by proposalId - Added with model.index('byProposalId')
 
-2. `auth.authenticated().to(['read', 'create'])`:
-   - This allows *any* authenticated user to create new proposals (which will then be owned by them).
-   - It also allows any authenticated user to *read* proposals. For the MVP, this is simple.
-   - Later, for features like "Shared with Me," we would need more granular read access, potentially using groups or custom resolvers.
-
-Status Values: 'DRAFT', 'SUBMITTED', 'IN_REVIEW', 'WON', 'LOST', 'ARCHIVED'
+Custom API Functions:
+- The proposalIdGenerator Lambda is used for generating custom proposal IDs
+- The proposalGeneratorLambda implements the proposal document generation logic
+- Both are correctly wired up to the GraphQL API via the schema definition
 */
+
+
